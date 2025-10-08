@@ -1,0 +1,15 @@
+{
+  "seed": 2,
+  "fed_rounds": 100,
+  "local_iters": 1000,
+  "batch": 128,
+  "buffer_size": 200000,
+  "logdir": "runs\\mafdrl_seed2",
+  "checkpoints_dir": "checkpoints_seed2",
+  "duration_min": 8.563,
+  "metrics": {
+    "eval_csv": "eval_seed2\\eval_metrics.csv"
+  },
+  "device": "cpu",
+  "torch": "2.3.1+cpu"
+}
