@@ -2,13 +2,12 @@
 import argparse, os, glob
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-
-import matplotlib.pyplot as plt
 import matplotlib as mpl
+import matplotlib.pyplot as plt
 
-# === Global IEEE-style plotting setup ===
-mpl.rcParams['font.family'] = 'Times New Roman'
+# === Global IEEE-style plotting setup (Times New Roman + tight margins) ===
+mpl.rcParams['font.family'] = 'serif'
+mpl.rcParams['font.serif'] = ['Times New Roman', 'Times', 'Nimbus Roman No9 L', 'DejaVu Serif']  # fallback chain
 mpl.rcParams['font.size'] = 11
 mpl.rcParams['axes.labelsize'] = 11
 mpl.rcParams['axes.titlesize'] = 11
@@ -18,14 +17,10 @@ mpl.rcParams['ytick.labelsize'] = 10
 mpl.rcParams['axes.edgecolor'] = 'black'
 mpl.rcParams['axes.linewidth'] = 0.8
 mpl.rcParams['figure.dpi'] = 300
-mpl.rcParams['savefig.bbox'] = 'tight'  # removes whitespace
+mpl.rcParams['savefig.bbox'] = 'tight'   # remove outer whitespace
 mpl.rcParams['savefig.pad_inches'] = 0
 mpl.rcParams['figure.autolayout'] = True
-
-
-# use Times New Roman for IEEE look (falls back silently if missing)
-plt.rcParams["font.family"] = "Times New Roman"
-plt.rcParams["pdf.fonttype"] = 42
+plt.rcParams["pdf.fonttype"] = 42        # keep text editable in PDF
 plt.rcParams["ps.fonttype"] = 42
 
 def moving_avg(x, w):
@@ -83,28 +78,29 @@ def main():
     if not runs:
         raise SystemExit(f"Tag '{args.tag}' not found in any runs under: {args.logroot}")
 
-    # Normalize to common x-axis (round indices)
+    # Normalize to common x-axis (round indices start at 1)
     max_round = max(int(steps.max()) for _, steps, _ in runs)
     xs = np.arange(1, max_round + 1, dtype=int)
 
-    # build matrix [n_runs, n_rounds] with NaNs then fill by step index
+    # Build matrix [n_runs, n_rounds] with NaNs, then fill by step index
     mat = np.full((len(runs), len(xs)), np.nan, dtype=float)
     names = []
     for i, (name, steps, vals) in enumerate(runs):
         names.append(name)
-        # steps from TB may start at 1 or 0; map to 1..max
+        # If steps start at 0, shift to start at 1
+        shift = 1 - int(steps.min())
         for s, v in zip(steps, vals):
-            idx = int(s) - 1 if 1 in steps else int(s)  # be robust
+            idx = int(s + shift) - 1
             if 0 <= idx < len(xs):
                 mat[i, idx] = v
 
-    # smoothing per run
+    # Smoothing per run
     for i in range(mat.shape[0]):
         row = mat[i]
         ok = ~np.isnan(row)
         row[ok] = moving_avg(row[ok], args.smooth)
 
-    # aggregate across runs (ignore NaNs)
+    # Aggregate across runs (ignore NaNs)
     mean = np.nanmean(mat, axis=0)
     std  = np.nanstd(mat, axis=0)
     n    = np.sum(~np.isnan(mat), axis=0)
@@ -112,24 +108,37 @@ def main():
     ci95_low = mean - 1.96 * se
     ci95_hi  = mean + 1.96 * se
 
-    # 3) plot
+    # 3) Plot (no titles per your professor’s ask)
     fig, ax = plt.subplots(figsize=(6.0, 4.0), dpi=200)
+
     # light lines for individual runs
     for i in range(mat.shape[0]):
         ax.plot(xs, mat[i], lw=1.0, alpha=0.35, color="gray")
+
     # mean + CI
     ax.plot(xs, mean, lw=2.0, color="black", label="MA-FDRL (mean)")
     ax.fill_between(xs, ci95_low, ci95_hi, color="gray", alpha=0.2, label="95% CI")
 
     ax.set_xlabel("Federated round")
     ax.set_ylabel("Mean reward")
-    ax.set_title("Convergence: mean reward vs. federated round")
     if args.ylim is not None:
         ax.set_ylim(args.ylim)
+
+    # Remove inner whitespace and clamp axes tightly to data
+    ax.margins(x=0, y=0)
+    ax.set_xlim(xs.min(), xs.max())
+    if args.ylim is None:
+        ymin = np.nanmin(ci95_low)
+        ymax = np.nanmax(ci95_hi)
+        if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
+            rng = ymax - ymin
+            pad = 0.01 * rng  # tiny pad to avoid clipping markers
+            ax.set_ylim(ymin - pad, ymax + pad)
+
     ax.grid(True, linestyle=":", linewidth=0.6, alpha=0.7)
     ax.legend(frameon=False, fontsize=10)
-    fig.tight_layout()
-    fig.savefig(args.out, bbox_inches="tight")
+
+    fig.savefig(args.out, dpi=300)  # bbox + pad already set in rcParams
     print(f"Saved plot -> {args.out}")
 
     # 4) CSV
