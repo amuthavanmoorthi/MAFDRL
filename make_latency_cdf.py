@@ -1,72 +1,64 @@
-import os
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+import os, pandas as pd, numpy as np, matplotlib.pyplot as plt
 from matplotlib import rcParams
 
-# ---- CONFIG ----
-SEED_FILES = [
-    "mafdrl-project/eval_seed0/eval_metrics.csv",
-    "mafdrl-project/eval_seed1/eval_metrics.csv",
-    "mafdrl-project/eval_seed2/eval_metrics.csv",
-]
-OUT_DIR = "Results"
-URRLC_THRESHOLD_MS = 10.0     # threshold line in ms
-LAT_COL = "mean_Te2e"         # column in CSV (seconds)
-# -----------------
+rcParams["font.family"] = "Times New Roman"
+plt.rcParams["figure.dpi"] = 150
 
-os.makedirs(OUT_DIR, exist_ok=True)
+SEEDS = ["eval_seed0", "eval_seed1", "eval_seed2"]
+OUT = os.path.join("Results", "latency_cdf.png")
+os.makedirs("Results", exist_ok=True)
 
-# ---- FONT SETTINGS: Times New Roman ----
-rcParams['font.family'] = 'Times New Roman'
-rcParams['font.size'] = 12
-rcParams['axes.linewidth'] = 0.8
+def derive_te2e(df: pd.DataFrame) -> np.ndarray:
+    # Prefer mean_Te2e if present and non-NaN
+    if "mean_Te2e" in df.columns:
+        arr = df["mean_Te2e"].astype(float).dropna().values
+        if arr.size > 0:
+            return arr
+    # Fallback: sum components (seconds)
+    need = ["mean_Ttx", "mean_TQ", "mean_Tcpu", "mean_Tloc"]
+    if all(c in df.columns for c in need):
+        comp = df[need].astype(float)
+        arr = comp.sum(axis=1).dropna().values
+        if arr.size > 0:
+            return arr
+    return np.array([])
 
-# ---- Load data ----
-dfs = []
-for p in SEED_FILES:
+all_lat = []
+labels = []
+for d in SEEDS:
+    p = os.path.join(d, "eval_metrics.csv")
     if not os.path.isfile(p):
-        raise FileNotFoundError(f"Missing file: {p}")
+        continue
     df = pd.read_csv(p)
-    if LAT_COL not in df.columns:
-        raise KeyError(f"Column '{LAT_COL}' not found in {p}. "
-                       f"Available: {list(df.columns)}")
-    dfs.append(df)
+    te2e = derive_te2e(df)
+    if te2e.size == 0:
+        continue
+    all_lat.append(np.sort(te2e))
+    labels.append(d)
 
-all_df = pd.concat(dfs, ignore_index=True)
-lat_ms = all_df[LAT_COL].to_numpy() * 1000.0  # seconds → ms
+if not all_lat:
+    raise FileNotFoundError("No usable latency series found. "
+                            "Ensure eval_seed*/eval_metrics.csv have either mean_Te2e or all components.")
 
-# ---- Compute CDF ----
-lat_sorted = np.sort(lat_ms)
-cdf = np.arange(1, len(lat_sorted) + 1) / len(lat_sorted)
+# Decide units: if typical values < 0.1 sec, show ms
+typical = float(np.mean(np.concatenate(all_lat)))
+use_ms = typical < 0.1
+xlabel = r"End-to-end latency $T_{\mathrm{E2E}}$ (ms)" if use_ms else r"End-to-end latency $T_{\mathrm{E2E}}$ (s)"
 
-# ---- Statistics ----
-mean_ms = np.mean(lat_ms)
-std_ms = np.std(lat_ms)
-p_below_10 = np.mean(lat_ms <= URRLC_THRESHOLD_MS)
+fig, ax = plt.subplots(figsize=(6.0, 3.8))
+for arr, lab in zip(all_lat, labels):
+    x = arr * 1e3 if use_ms else arr
+    y = np.linspace(0, 1, len(x), endpoint=True)
+    ax.plot(x, y, lw=1.8, label=lab.replace("_", " "))
 
-print("========== Latency CDF summary ==========")
-print(f"Samples: {len(lat_ms)}")
-print(f"Mean T^E2E (ms): {mean_ms:.2f}")
-print(f"Std  T^E2E (ms): {std_ms:.2f}")
-print(f"P[T^E2E <= {URRLC_THRESHOLD_MS:.0f} ms]: {p_below_10*100:.2f}%")
-print("=========================================")
+ax.set_xlabel(xlabel)
+ax.set_ylabel("CDF")
+ax.grid(True, alpha=0.3)
 
-# ---- Plot ----
-plt.figure(figsize=(6,4))
-plt.plot(lat_sorted, cdf, linewidth=2, color='black')
-plt.axvline(URRLC_THRESHOLD_MS, linestyle='--', linewidth=1, color='gray')
+# place legend below the plot, no title on top
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18),
+          ncol=len(labels), frameon=False)
+plt.subplots_adjust(bottom=0.28)
 
-plt.xlabel(r'End-to-end latency $T^{\mathrm{E2E}}$ (ms)', labelpad=4)
-plt.ylabel('CDF', labelpad=4)
-
-# No title
-plt.grid(True, linestyle=':', linewidth=0.5, alpha=0.6)
-plt.tight_layout()
-
-out_png = os.path.join(OUT_DIR, "latency_cdf_ieee.png")
-plt.savefig(out_png, dpi=600, bbox_inches='tight')
-plt.close()
-
-print(f"Saved high-resolution figure: {out_png}")
-print("✅ Figure ready for IEEE paper (Times New Roman, no title).")
+plt.savefig(OUT, bbox_inches="tight")
+print(f"[OK] {OUT}")
