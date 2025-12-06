@@ -1,282 +1,188 @@
-# -*- coding: utf-8 -*-
-"""
-evaluate.py — writes eval_seed*/eval_metrics.csv with per-UE offloading ratios (rho_u*).
-
-Save as:
-  C:\\Gaby\\mafdrl-project\\evaluate.py
-"""
-
-import os
-import sys
+# ================================================================
+# evaluate.py — Correct evaluator for MA-FDRL MADDPG (3 actors)
+# ================================================================
 import argparse
-import importlib
-import importlib.util
 from pathlib import Path
-from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
+import torch
+from scipy.special import expit
+
+from mafdrl.envs.mec_urlcc_env import MECURLLCEnv
+from mafdrl.agents.maddpg import MADDPG
 
 
-# ---------------------------------------------------------------------
-#  Basic import setup
-# ---------------------------------------------------------------------
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
+# -----------------------------
+# MAP RAW ACTIONS TO VALID ENV
+# -----------------------------
+def map_actions(env, acts: np.ndarray) -> np.ndarray:
+    """Map raw actor outputs to valid action ranges for MECURLLCEnv."""
+    acts = acts.copy()
+
+    # power p in [0, p_max]
+    acts[:, 0] = np.clip(np.abs(acts[:, 0]), 0, env.p_max)
+
+    # rho in (0, 1)
+    acts[:, 1] = expit(acts[:, 1])
+
+    # w — env normalizes internally (no change)
+
+    # f_loc ≥ 10% f_max
+    f_min = 0.10 * env.f_loc_max
+    acts[:, -1] = f_min + expit(acts[:, -1]) * (env.f_loc_max - f_min)
+
+    return acts
 
 
-# ---------------------------------------------------------------------
-#  Helper utilities
-# ---------------------------------------------------------------------
-def ensure_dir(path: str):
-    Path(path).mkdir(parents=True, exist_ok=True)
+def _mean_or_nan(x):
+    """Return mean of x (array/list/scalar) as float, or NaN if missing/empty."""
+    if x is None:
+        return float("nan")
+    arr = np.array(x, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return float("nan")
+    return float(np.mean(arr))
 
 
-def dynamic_import(class_path: str):
-    """
-    Import a class from either:
-      1) 'package.module:ClassName'
-      2) 'path\\to\\file.py:ClassName'
-    """
-    if ":" not in class_path:
-        raise ValueError(
-            f'Invalid class path "{class_path}". Use "module:Class" or "file.py:Class".'
-        )
-    module_ref, class_name = class_path.split(":", 1)
-
-    if module_ref.endswith(".py"):
-        file_path = os.path.abspath(module_ref)
-        module_name = os.path.splitext(os.path.basename(file_path))[0]
-        spec = importlib.util.spec_from_file_location(module_name, file_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"Cannot load module from {file_path}")
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = mod
-        spec.loader.exec_module(mod)
-        try:
-            return getattr(mod, class_name)
-        except AttributeError:
-            raise AttributeError(f'Class "{class_name}" not found in file "{file_path}".')
-
-    mod = importlib.import_module(module_ref)
-    try:
-        return getattr(mod, class_name)
-    except AttributeError:
-        raise AttributeError(f'Class "{class_name}" not found in module "{module_ref}".')
+def _mean_sinr_db(x):
+    """Mean SINR in dB from linear SINR array/list/scalar."""
+    if x is None:
+        return float("nan")
+    arr = np.array(x, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return float("nan")
+    mean_lin = float(np.mean(arr))
+    mean_lin = max(mean_lin, 1e-12)
+    return float(10.0 * np.log10(mean_lin))
 
 
-def _to_bool_flag(x) -> bool:
-    """Return True if any agent is done; handle scalars, lists, tuples, numpy arrays."""
-    if isinstance(x, (list, tuple)):
-        return any(bool(v) for v in x)
-    try:
-        import numpy as _np
-        if isinstance(x, _np.ndarray):
-            return bool(_np.any(x))
-    except Exception:
-        pass
-    return bool(x)
+# ================================================================
+# EVALUATION SCRIPT
+# ================================================================
+def evaluate(
+    seed: int = 0,
+    steps: int = 200,
+    checkpoint_prefix: str = "checkpoints/actor_agent",
+    U: int = 3,
+    obs_dim: int = 4,
+    act_dim: int = 5,
+    outdir: str = "eval_seed0",
+):
+    # ----------------------------
+    # 1. Prepare environment
+    # ----------------------------
+    # Mt, Nr should match training defaults
+    env = MECURLLCEnv(U=U, Mt=2, Nr=4, seed=seed)
 
+    # ----------------------------
+    # 2. Build MADDPG
+    # ----------------------------
+    agent = MADDPG(U, obs_dim, act_dim, device="cpu")
 
-def step_env(env, actions):
-    """
-    Handle both Gym (4-tuple) and Gymnasium (5-tuple) step outputs.
-    """
-    out = env.step(actions)
-    if len(out) == 4:
-        # (obs, reward, done, info)
-        next_obs, reward, done, info = out
-        done_flag = _to_bool_flag(done)
-    else:
-        # (obs, reward, terminated, truncated, info)
-        next_obs, reward, terminated, truncated, info = out
-        done_flag = _to_bool_flag(terminated) or _to_bool_flag(truncated)
-    return next_obs, reward, done_flag, info
+    # ----------------------------
+    # 3. Load ALL actor checkpoints
+    # ----------------------------
+    actor_paths = [f"{checkpoint_prefix}{i}.pt" for i in range(U)]
 
+    actor_state_list = []
+    for p in actor_paths:
+        path = Path(p)
+        if not path.exists():
+            raise FileNotFoundError(f"Missing checkpoint: {path}")
+        sd = torch.load(path, map_location="cpu")
+        actor_state_list.append(sd)
 
-def extract_num_agents_from_obs(obs) -> int:
-    if isinstance(obs, dict) and "obs" in obs:
-        obs = obs["obs"]
-    if hasattr(obs, "__len__"):
-        return len(obs)
-    return 1
+    agent.set_actor_params(actor_state_list)
+    print("[OK] Loaded all 3 actor agents.")
 
+    # ----------------------------
+    # 4. Evaluate loop
+    # ----------------------------
+    results = {
+        "step": [],
+        "mean_Te2e": [],
+        "mean_Ttx": [],
+        "mean_TQ": [],
+        "mean_Tcpu": [],
+        "mean_Tloc": [],
+        "mean_SINR_dB": [],
+        "rho_u0": [],
+        "rho_u1": [],
+        "rho_u2": [],
+    }
 
-def get_metric(info: Dict[str, Any], key: str, default=np.nan) -> float:
-    v = info.get(key, default)
-    if isinstance(v, (list, tuple, np.ndarray)):
-        try:
-            return float(np.mean(v))
-        except Exception:
-            return default
-    try:
-        return float(v)
-    except Exception:
-        return default
+    obs = env.reset()
 
+    for t in range(steps):
+        # deterministic evaluation: no exploration noise
+        acts = agent.act(obs, noise_scale=0.0)
+        acts = map_actions(env, acts)
 
-def eval_once(env, policy, max_steps: int, rho_index: int, seed: int) -> pd.DataFrame:
-    try:
-        obs = env.reset(seed=seed)
-    except TypeError:
-        obs = env.reset()
+        nobs, rew, done, trunc, info = env.step(acts)
 
-    U = extract_num_agents_from_obs(obs)
-    rows: List[Dict[str, Any]] = []
+        results["step"].append(t)
 
-    step = 0
-    done = False
-    while step < max_steps and not done:
-        actions = policy.act(obs, deterministic=True)
+        # latency components are very likely per-UE arrays: average them
+        results["mean_Te2e"].append(_mean_or_nan(info.get("T_e2e", None)))
+        results["mean_Ttx"].append(_mean_or_nan(info.get("T_tx", None)))
+        results["mean_TQ"].append(_mean_or_nan(info.get("T_Q", None)))
+        results["mean_Tcpu"].append(_mean_or_nan(info.get("T_cpu", None)))
+        results["mean_Tloc"].append(_mean_or_nan(info.get("T_loc", None)))
 
-        # extract rho
-        rhos: List[float] = []
-        for a in actions:
-            a_vec = np.asarray(a).reshape(-1)
-            idx = rho_index if rho_index < a_vec.size else (a_vec.size - 1)
-            rho_val = float(np.clip(a_vec[idx], 0.0, 1.0))
-            rhos.append(rho_val)
+        # SINR averaged across users, converted to dB
+        results["mean_SINR_dB"].append(_mean_sinr_db(info.get("sinr", None)))
 
-        next_obs, reward, done, info = step_env(env, actions)
-
-        row = {
-            "step": step,
-            "mean_Te2e": get_metric(info, "mean_Te2e"),
-            "mean_Ttx": get_metric(info, "mean_Ttx"),
-            "mean_TQ": get_metric(info, "mean_TQ"),
-            "mean_Tcpu": get_metric(info, "mean_Tcpu"),
-            "mean_Tloc": get_metric(info, "mean_Tloc"),
-            "mean_SINR_dB": get_metric(info, "mean_SINR_dB"),
-        }
+        # offloading ratios rho: array of length U
+        rho = info.get("rho", [np.nan] * U)
+        rho_arr = np.array(rho, dtype=float).reshape(-1)
         for u in range(U):
-            row[f"rho_u{u}"] = rhos[u]
-        rows.append(row)
+            val = rho_arr[u] if u < rho_arr.size else np.nan
+            results[f"rho_u{u}"].append(float(val))
 
-        obs = next_obs
-        step += 1
+        obs = nobs
 
-    return pd.DataFrame(rows)
-
-
-# ---------------------------------------------------------------------
-#  Main entry
-# ---------------------------------------------------------------------
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--steps", type=int, default=200)
-    ap.add_argument("--checkpoint", type=str, required=True)
-    ap.add_argument("--outdir", type=str, default="eval_seed0")
-    ap.add_argument("--env-class", type=str, required=True,
-                    help='Env class "package.module:ClassName" or "path\\file.py:ClassName"')
-    ap.add_argument("--policy-class", type=str, required=True,
-                    help='Policy class "package.module:ClassName" or "path\\file.py:ClassName"')
-    ap.add_argument("--rho-index", type=int, default=2)
-    ap.add_argument("--policy-act", type=str, default="act")
-    ap.add_argument("--U", type=int, default=None)
-    ap.add_argument("--obs-dim", type=int, default=None)
-    ap.add_argument("--act-dim", type=int, default=None)
-    args = ap.parse_args()
-
-    ensure_dir(args.outdir)
-
-    # Build env
-    EnvClass = dynamic_import(args.env_class)
-    try:
-        env = EnvClass(seed=args.seed)
-    except TypeError:
-        env = EnvClass()
-
-    # Infer dims (if not provided)
-    U = args.U
-    obs_dim = args.obs_dim
-    act_dim = args.act_dim
-
-    if obs_dim is None or act_dim is None:
-        try:
-            obs = env.reset(seed=args.seed)
-        except TypeError:
+        # safety reset if episode terminates
+        if bool(np.any(done)) or bool(np.any(trunc)):
             obs = env.reset()
-        if isinstance(obs, dict) and "obs" in obs:
-            obs = obs["obs"]
-        if obs_dim is None:
-            obs_dim = np.asarray(obs[0]).reshape(-1).size
-        if act_dim is None:
-            act_dim = 4
 
-    # -----------------------------------------------------------------
-    #  Build policy
-    # -----------------------------------------------------------------
-    PolicyClass = dynamic_import(args.policy_class)
-    try:
-        policy = PolicyClass(U, obs_dim, act_dim)
-    except TypeError:
-        policy = PolicyClass(U=U, obs_dim=obs_dim, act_dim=act_dim)
-
-    # Try loading weights (torch or .load)
-    loaded = False
-    if hasattr(policy, "load"):
-        try:
-            policy.load(args.checkpoint)
-            loaded = True
-        except Exception:
-            pass
-
-    if not loaded:
-        try:
-            import torch
-            sd = torch.load(args.checkpoint, map_location="cpu")
-
-            if hasattr(policy, "load_state_dict") and isinstance(sd, dict):
-                try:
-                    policy.load_state_dict(sd, strict=False)
-                    loaded = True
-                except Exception:
-                    pass
-
-            if not loaded and isinstance(sd, dict):
-                if hasattr(policy, "actor") and "actor" in sd and hasattr(policy.actor, "load_state_dict"):
-                    try:
-                        policy.actor.load_state_dict(sd["actor"], strict=False)
-                        loaded = True
-                    except Exception:
-                        pass
-                if hasattr(policy, "critic") and "critic" in sd and hasattr(policy.critic, "load_state_dict"):
-                    try:
-                        policy.critic.load_state_dict(sd["critic"], strict=False)
-                        loaded = True
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-    if not loaded:
-        print("[WARN] Could not load weights into policy automatically. Proceeding with random weights.")
-
-    # Pick action method
-    act_fn = getattr(policy, args.policy_act, None)
-    if act_fn is None:
-        for cand in ("act", "select_action", "predict"):
-            if hasattr(policy, cand):
-                act_fn = getattr(policy, cand)
-                break
-    if act_fn is None:
-        raise RuntimeError("No action method found. Try --policy-act select_action (or predict).")
-
-    def _shim_act(obs, deterministic=True):
-        return act_fn(obs)
-    policy.act = _shim_act
-
-    # -----------------------------------------------------------------
-    #  Run evaluation and save
-    # -----------------------------------------------------------------
-    df = eval_once(env, policy, max_steps=args.steps, rho_index=args.rho_index, seed=args.seed)
-    out_csv = os.path.join(args.outdir, "eval_metrics.csv")
-    df.to_csv(out_csv, index=False)
-    print(f"[OK] Saved metrics with rho columns: {out_csv}")
-    print("Columns:", list(df.columns))
+    # ----------------------------
+    # 5. Save CSV
+    # ----------------------------
+    outdir_path = Path(outdir)
+    outdir_path.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(results)
+    csv_path = outdir_path / "eval_metrics.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"[OK] Saved evaluation to: {csv_path}")
 
 
+# ================================================================
+# CLI ENTRYPOINT
+# ================================================================
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--steps", type=int, default=200)
+    parser.add_argument(
+        "--checkpoint_prefix",
+        type=str,
+        default="checkpoints/actor_agent",
+    )
+    parser.add_argument("--U", type=int, default=3)
+    parser.add_argument("--obs_dim", type=int, default=4)
+    parser.add_argument("--act_dim", type=int, default=5)
+    parser.add_argument("--outdir", type=str, default="eval_seed0")
+
+    args = parser.parse_args()
+
+    evaluate(
+        seed=args.seed,
+        steps=args.steps,
+        checkpoint_prefix=args.checkpoint_prefix,
+        U=args.U,
+        obs_dim=args.obs_dim,
+        act_dim=args.act_dim,
+        outdir=args.outdir,
+    )

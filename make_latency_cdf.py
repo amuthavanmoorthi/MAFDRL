@@ -1,64 +1,106 @@
-import os, pandas as pd, numpy as np, matplotlib.pyplot as plt
-from matplotlib import rcParams
+# make_latency_cdf.py
+#
+# CDF of end-to-end latency T_E2E for three seeds.
 
-rcParams["font.family"] = "Times New Roman"
-plt.rcParams["figure.dpi"] = 150
+import os
+import glob
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
-SEEDS = ["eval_seed0", "eval_seed1", "eval_seed2"]
-OUT = os.path.join("Results", "latency_cdf.png")
-os.makedirs("Results", exist_ok=True)
+# ---- global plotting style (match Fig. 2) ----
+plt.rcParams["font.family"] = "Times New Roman"
+plt.rcParams["font.size"] = 10
+plt.rcParams["axes.linewidth"] = 0.8
 
-def derive_te2e(df: pd.DataFrame) -> np.ndarray:
-    # Prefer mean_Te2e if present and non-NaN
-    if "mean_Te2e" in df.columns:
-        arr = df["mean_Te2e"].astype(float).dropna().values
-        if arr.size > 0:
-            return arr
-    # Fallback: sum components (seconds)
-    need = ["mean_Ttx", "mean_TQ", "mean_Tcpu", "mean_Tloc"]
-    if all(c in df.columns for c in need):
-        comp = df[need].astype(float)
-        arr = comp.sum(axis=1).dropna().values
-        if arr.size > 0:
-            return arr
-    return np.array([])
+RESULT_DIR = "Results"
+os.makedirs(RESULT_DIR, exist_ok=True)
 
-all_lat = []
-labels = []
-for d in SEEDS:
-    p = os.path.join(d, "eval_metrics.csv")
-    if not os.path.isfile(p):
-        continue
-    df = pd.read_csv(p)
-    te2e = derive_te2e(df)
-    if te2e.size == 0:
-        continue
-    all_lat.append(np.sort(te2e))
-    labels.append(d)
 
-if not all_lat:
-    raise FileNotFoundError("No usable latency series found. "
-                            "Ensure eval_seed*/eval_metrics.csv have either mean_Te2e or all components.")
+def load_latency(seed_dir: str) -> np.ndarray:
+    csv_files = sorted(glob.glob(os.path.join(seed_dir, "*.csv")))
+    if not csv_files:
+        raise FileNotFoundError(f"No CSV files found in {seed_dir}")
+    df = pd.read_csv(csv_files[0])
 
-# Decide units: if typical values < 0.1 sec, show ms
-typical = float(np.mean(np.concatenate(all_lat)))
-use_ms = typical < 0.1
-xlabel = r"End-to-end latency $T_{\mathrm{E2E}}$ (ms)" if use_ms else r"End-to-end latency $T_{\mathrm{E2E}}$ (s)"
+    # support both names (depending on evaluate.py version)
+    if "T_e2e" in df.columns:
+        col = "T_e2e"
+    elif "mean_Te2e" in df.columns:
+        col = "mean_Te2e"
+    else:
+        raise KeyError(
+            f"No latency column 'T_e2e' or 'mean_Te2e' in {csv_files[0]}.\n"
+            f"Columns: {list(df.columns)}"
+        )
 
-fig, ax = plt.subplots(figsize=(6.0, 3.8))
-for arr, lab in zip(all_lat, labels):
-    x = arr * 1e3 if use_ms else arr
-    y = np.linspace(0, 1, len(x), endpoint=True)
-    ax.plot(x, y, lw=1.8, label=lab.replace("_", " "))
+    vals = df[col].values.astype(float)
+    vals = vals[np.isfinite(vals)]
+    return vals
 
-ax.set_xlabel(xlabel)
-ax.set_ylabel("CDF")
-ax.grid(True, alpha=0.3)
 
-# place legend below the plot, no title on top
-ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18),
-          ncol=len(labels), frameon=False)
-plt.subplots_adjust(bottom=0.28)
+def main():
+    seed_dirs = ["eval_seed0", "eval_seed1", "eval_seed2"]
+    labels = ["Seed seed0", "Seed seed1", "Seed seed2"]
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c"]
 
-plt.savefig(OUT, bbox_inches="tight")
-print(f"[OK] {OUT}")
+    fig, ax = plt.subplots(figsize=(3.5, 2.6))  # similar size as Fig. 2
+
+    all_T = []
+
+    for d, lab, col in zip(seed_dirs, labels, colors):
+        T = load_latency(d)
+        if T.size == 0:
+            continue
+        T_sorted = np.sort(T)
+        all_T.append(T_sorted)
+
+        N = len(T_sorted)
+        cdf = np.arange(1, N + 1) / float(N)
+
+        ax.plot(
+            T_sorted,
+            cdf,
+            label=lab,
+            linewidth=1.3,
+            solid_capstyle="round",
+            color=col,
+        )
+
+    if not all_T:
+        raise RuntimeError("No latency data found in eval_seed* directories.")
+
+    concat_T = np.concatenate(all_T)
+    xmin = max(0.0, float(np.min(concat_T)))
+    xmax = float(np.max(concat_T))
+    if xmax <= xmin:
+        xmax = xmin + 1e-3
+
+    # small margin (no big white gap)
+    x_margin = 0.02 * (xmax - xmin)
+    ax.set_xlim(xmin - x_margin, xmax + x_margin)
+    ax.set_ylim(0.0, 1.0)
+
+    ax.set_xlabel("End-to-end latency $T_{\\mathrm{E2E}}$ (s)")
+    ax.set_ylabel("CDF")
+
+    ax.grid(True, linestyle="--", alpha=0.35)
+
+    # legend inside the axes (top-left) – avoids extra bottom space
+    ax.legend(
+        loc="lower right",
+        frameon=False,
+        fontsize=8,
+    )
+
+    fig.tight_layout()
+
+    png_path = os.path.join(RESULT_DIR, "latency_cdf.png")
+    pdf_path = os.path.join(RESULT_DIR, "latency_cdf.pdf")
+    fig.savefig(png_path, dpi=300)
+    fig.savefig(pdf_path)
+    print(f"[OK] Saved: {png_path}, {pdf_path}")
+
+
+if __name__ == "__main__":
+    main()

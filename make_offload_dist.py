@@ -1,55 +1,103 @@
-import os, glob, pandas as pd, numpy as np, matplotlib.pyplot as plt
-from matplotlib import rcParams
+# make_offload_dist.py
+#
+# Offloading ratio distribution per UE (UE1..UE3).
 
-rcParams["font.family"] = "Times New Roman"
-plt.rcParams["figure.dpi"] = 150
+import os
+import glob
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
-SEEDS = ["eval_seed0", "eval_seed1", "eval_seed2"]
-OUT = os.path.join("Results", "offload_distribution.png")
-os.makedirs("Results", exist_ok=True)
+plt.rcParams["font.family"] = "Times New Roman"
+plt.rcParams["font.size"] = 10
+plt.rcParams["axes.linewidth"] = 0.8
 
-dfs = []
-for d in SEEDS:
-    p = os.path.join(d, "eval_metrics.csv")
-    if os.path.isfile(p):
-        df = pd.read_csv(p)
-        df["seed"] = d
-        dfs.append(df)
-if not dfs:
-    raise FileNotFoundError("No eval_seed*/eval_metrics.csv found.")
+RESULT_DIR = "Results"
+os.makedirs(RESULT_DIR, exist_ok=True)
 
-df = pd.concat(dfs, ignore_index=True)
 
-# gather all rho columns
-rho_cols = [c for c in df.columns if c.startswith("rho_u")]
-U = len(rho_cols)
+def load_rho_from_dir(seed_dir: str):
+    csv_files = sorted(glob.glob(os.path.join(seed_dir, "*.csv")))
+    if not csv_files:
+        raise FileNotFoundError(f"No CSV files found in {seed_dir}")
+    df = pd.read_csv(csv_files[0])
 
-# Build a long-form table for box/violin plots
-long = []
-for u in range(U):
-    col = f"rho_u{u}"
-    tmp = df[[col]].copy()
-    tmp["UE"] = f"UE{u+1}"
-    tmp.rename(columns={col: "rho"}, inplace=True)
-    long.append(tmp)
-long = pd.concat(long, ignore_index=True)
+    # assumes evaluate.py saved rho_u0, rho_u1, rho_u2
+    r0 = df["rho_u0"].values.astype(float)
+    r1 = df["rho_u1"].values.astype(float)
+    r2 = df["rho_u2"].values.astype(float)
+    return r0, r1, r2
 
-fig, ax = plt.subplots(figsize=(6.0, 3.8))
-# violin plot (nice for distributions)
-parts = ax.violinplot(
-    [long[long["UE"]==f"UE{i+1}"]["rho"].values for i in range(U)],
-    showmedians=True
-)
-ax.set_xticks(np.arange(1, U+1))
-ax.set_xticklabels([f"UE{i+1}" for i in range(U)])
-ax.set_ylabel("Offloading ratio ρ")
-ax.set_xlabel("User equipment (UE)")
-ax.set_ylim(0, 1)
 
-# put legend-like caption under the plot
-plt.subplots_adjust(bottom=0.25)
-ax.text(0.5, -0.25, "Distribution of offloading ratios across seeds (no title per IEEE style)",
-        transform=ax.transAxes, ha="center", va="top")
+def main():
+    seed_dirs = ["eval_seed0", "eval_seed1", "eval_seed2"]
 
-plt.savefig(OUT, bbox_inches="tight")
-print(f"[OK] {OUT}")
+    rho_all = {0: [], 1: [], 2: []}
+    for d in seed_dirs:
+        r0, r1, r2 = load_rho_from_dir(d)
+        rho_all[0].extend(r0.tolist())
+        rho_all[1].extend(r1.tolist())
+        rho_all[2].extend(r2.tolist())
+
+    data = [np.array(rho_all[0]), np.array(rho_all[1]), np.array(rho_all[2])]
+
+    fig, ax = plt.subplots(figsize=(3.5, 2.6))
+
+    bp = ax.boxplot(
+        data,
+        patch_artist=True,
+        tick_labels=["UE1", "UE2", "UE3"],
+        widths=0.45,
+        whis=1.5,
+        showfliers=False,
+    )
+
+    # soft colors
+    box_colors = ["#c6dbef", "#9ecae1", "#6baed6"]
+    for patch, color in zip(bp["boxes"], box_colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.9)
+
+    for element in ["whiskers", "caps", "medians"]:
+        for line in bp[element]:
+            line.set_linewidth(0.9)
+
+    # overall mean per UE (green triangle)
+    means = [float(np.mean(d)) for d in data]
+    x = np.array([1, 2, 3], dtype=float)
+    ax.scatter(
+        x,
+        means,
+        s=45,
+        marker="^",
+        color="green",
+        edgecolor="black",
+        linewidth=0.5,
+        label="Overall mean",
+        zorder=5,
+    )
+
+    ax.set_ylabel("Offloading ratio $\\rho$")
+    ax.set_xlabel("User equipment (UE)")
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_xlim(0.5, 3.5)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.35)
+
+    # legend inside plot, top-right – no bottom margin
+    ax.legend(
+        loc="upper right",
+        frameon=False,
+        fontsize=8,
+    )
+
+    fig.tight_layout()
+
+    png_path = os.path.join(RESULT_DIR, "offload_distribution.png")
+    pdf_path = os.path.join(RESULT_DIR, "offload_distribution.pdf")
+    fig.savefig(png_path, dpi=300)
+    fig.savefig(pdf_path)
+    print(f"[OK] Saved: {png_path}, {pdf_path}")
+
+
+if __name__ == "__main__":
+    main()
