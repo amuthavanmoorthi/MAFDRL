@@ -1,4 +1,4 @@
-# RL algoright
+# RL algorithm
 import copy
 import numpy as np
 import torch as th
@@ -8,21 +8,29 @@ from .actor_critic import Actor, Critic
 
 
 class MADDPG:
-    def __init__(self, U, obs_dim, act_dim, lr=1e-3, gamma=0.99, tau=0.01, device="cpu"):
+    def __init__(self, U, obs_dim, act_dim, lr=1e-3, gamma=0.99, tau=0.05, device="cpu"):
+        """
+        Stable MADDPG for federated MA-FDRL (Option B):
+        - Slightly smaller actor LR
+        - Much smaller critic LR
+        - Faster target update (larger tau)
+        - Lower exploration noise in act()
+        These changes are only for stability / smoother convergence.
+        """
         self.U = U
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.gamma = gamma
-        self.tau = tau
+        self.tau = tau          # was 0.01, now 0.05 for faster target tracking
         self.device = device
 
         # per-agent actors
         self.actors = [Actor(obs_dim, act_dim).to(device) for _ in range(U)]
         self.actors_t = [copy.deepcopy(a).to(device) for a in self.actors]
 
-        # === learning rates: make critic slower ===
-        actor_lr = lr           # keep original lr for actors
-        critic_lr = lr * 0.5    # critic learns at half speed (you can tune this)
+        # === learning rates: make critic slower, actor a bit slower too ===
+        actor_lr = lr * 0.5      # was lr; slightly slower, smoother updates
+        critic_lr = lr * 0.1     # was lr * 0.5; much slower critic to reduce variance
 
         # optimizers
         self.opt_actors = [optim.Adam(a.parameters(), lr=actor_lr) for a in self.actors]
@@ -34,7 +42,11 @@ class MADDPG:
 
         self.mse = nn.MSELoss()
 
-    def act(self, obs_np, noise_scale=0.1):
+    def act(self, obs_np, noise_scale=0.05):
+        """
+        Forward pass through actors with small Gaussian exploration.
+        Default noise_scale was 0.1; reduced to 0.05 for smoother reward curve.
+        """
         # obs_np: (U, obs_dim)
         obs = th.tensor(obs_np, dtype=th.float32, device=self.device)
         with th.no_grad():
@@ -44,23 +56,25 @@ class MADDPG:
                 acts.append(a_u)
         acts = np.stack(acts, axis=0)
         acts += noise_scale * np.random.randn(*acts.shape)
+        acts = np.nan_to_num(acts, nan=0.0, posinf=0.0, neginf=0.0)
         return acts
 
     def update(self, batch, p_bounds):
         obs, act, rew, nobs, done = batch
         B = obs.shape[0]
-        obs_t = th.tensor(obs, dtype=th.float32, device=self.device)    # (B,U,obs)
-        act_t = th.tensor(act, dtype=th.float32, device=self.device)    # (B,U,act)
-        rew_t = th.tensor(rew, dtype=th.float32, device=self.device)    # (B,U)
-        nobs_t = th.tensor(nobs, dtype=th.float32, device=self.device)  # (B,U,obs)
-        done_t = th.tensor(done, dtype=th.float32, device=self.device)  # (B,U)
+        obs_t  = th.tensor(obs,  dtype=th.float32, device=self.device)   # (B,U,obs)
+        act_t  = th.tensor(act,  dtype=th.float32, device=self.device)   # (B,U,act)
+        rew_t  = th.tensor(rew,  dtype=th.float32, device=self.device)   # (B,U)
+        nobs_t = th.tensor(nobs, dtype=th.float32, device=self.device)   # (B,U,obs)
+        done_t = th.tensor(done, dtype=th.float32, device=self.device)   # (B,U)
 
-        # target actions
+        # ---------- target actions ----------
         with th.no_grad():
             nact_list = []
             for u in range(self.U):
                 nact_list.append(self.actors_t[u](nobs_t[:, u, :]))
             nact = th.stack(nact_list, dim=1)  # (B,U,act)
+
             q_next_in = th.cat(
                 [nobs_t.reshape(B, -1), nact.reshape(B, -1)],
                 dim=1
@@ -71,7 +85,7 @@ class MADDPG:
                 + (1.0 - done_t.max(dim=1).values) * self.gamma * q_next
             ).detach()
 
-        # critic update
+        # ---------- critic update ----------
         q_in = th.cat([obs_t.reshape(B, -1), act_t.reshape(B, -1)], dim=1)
         q = self.critic(q_in).squeeze(-1)
         critic_loss = self.mse(q, y)
@@ -83,7 +97,7 @@ class MADDPG:
 
         self.opt_critic.step()
 
-        # actors update (each agent maximizes Q)
+        # ---------- actors update (each agent maximizes Q) ----------
         for u in range(self.U):
             a_pred = self.actors[u](obs_t[:, u, :])
             a_all = act_t.clone()
@@ -101,7 +115,7 @@ class MADDPG:
 
             self.opt_actors[u].step()
 
-        # soft target updates
+        # ---------- soft target updates ----------
         with th.no_grad():
             for u in range(self.U):
                 for p, tp in zip(self.actors[u].parameters(), self.actors_t[u].parameters()):

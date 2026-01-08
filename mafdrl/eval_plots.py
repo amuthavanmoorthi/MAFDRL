@@ -1,364 +1,196 @@
-# # mafdrl/eval_plots.py
-# import os, glob, csv
-# import numpy as np
-# import torch as th
-# import matplotlib.pyplot as plt
-# from scipy.special import expit
-
-# from mafdrl.envs.mec_urlcc_env import MECURLLCEnv
-# from mafdrl.agents.maddpg import MADDPG
-
-# def load_actors(algo: MADDPG, ckpt_dir="checkpoints"):
-#     paths = sorted(glob.glob(os.path.join(ckpt_dir, "actor_agent*.pt")))
-#     if not paths:
-#         print("No checkpoints found; run training first.")
-#         return False
-#     sds = [th.load(p, map_location="cpu") for p in paths]
-#     algo.set_actor_params(sds)
-#     print(f"Loaded {len(sds)} actor checkpoints from {ckpt_dir}")
-#     return True
-
-# def eval_and_plot(U=3, Mt=2, Nr=4, steps=500, seed=123, outdir="."):
-#     os.makedirs(outdir, exist_ok=True)
-
-#     # Env + algo
-#     env = MECURLLCEnv(U=U, Mt=Mt, Nr=Nr, seed=seed)
-#     obs_dim = 4
-#     act_dim = 2 + Mt + 1
-#     algo = MADDPG(U, obs_dim, act_dim, device="cpu")
-#     _ = load_actors(algo)
-
-#     # Data buffers
-#     mean_rewards = []
-#     all_sinr = []
-#     all_Te2e = []
-#     all_Tloc = []
-#     all_Ttx = []
-#     all_TQ = []
-#     all_Tcpu = []
-
-#     # Rollout (deterministic: noise_scale=0)
-#     obs = env.reset()
-#     for t in range(steps):
-#         acts = algo.act(obs, noise_scale=0.0)
-#         # map actions to valid ranges
-#         acts[:, 0] = np.clip(np.abs(acts[:, 0]), 0, env.p_max)     # p
-#         acts[:, 1] = expit(acts[:, 1])                              # rho
-#         # w left as-is; env normalizes inside
-#         # f_loc with stability floor (same as train)
-#         f_min = 0.10 * env.f_loc_max
-#         acts[:, -1] = f_min + expit(acts[:, -1]) * (env.f_loc_max - f_min)
-
-#         obs, rew, done, trunc, info = env.step(acts)
-
-#         mean_rewards.append(float(np.mean(rew)))
-#         all_sinr.append(info["sinr"].copy())
-#         all_Te2e.append(info["T_e2e"].copy())
-#         all_Tloc.append(info["T_loc"].copy())
-#         all_Ttx.append(info["T_tx"].copy())
-#         all_TQ.append(info["T_Q"].copy())
-#         all_Tcpu.append(info["T_cpu"].copy())
-
-#     # Convert to arrays
-#     mean_rewards = np.asarray(mean_rewards)                   # (steps,)
-#     sinr = np.vstack(all_sinr)                                # (steps,U)
-#     Te2e = np.vstack(all_Te2e)
-#     Tloc = np.vstack(all_Tloc)
-#     Ttx  = np.vstack(all_Ttx)
-#     TQ   = np.vstack(all_TQ)
-#     Tcpu = np.vstack(all_Tcpu)
-
-#     # ---- Save CSV for paper tables ----
-#     csv_path = os.path.join(outdir, "eval_metrics.csv")
-#     with open(csv_path, "w", newline="") as f:
-#         w = csv.writer(f)
-#         w.writerow(["step", "mean_reward", "mean_Te2e", "mean_Tloc", "mean_Ttx", "mean_TQ", "mean_Tcpu", "mean_SINR_dB"])
-#         for i in range(len(mean_rewards)):
-#             mean_sinr_db = 10*np.log10(max(1e-12, np.mean(sinr[i])))
-#             w.writerow([
-#                 i+1,
-#                 f"{mean_rewards[i]:.6f}",
-#                 f"{np.mean(Te2e[i]):.6e}",
-#                 f"{np.mean(Tloc[i]):.6e}",
-#                 f"{np.mean(Ttx[i]):.6e}",
-#                 f"{np.mean(TQ[i]):.6e}",
-#                 f"{np.mean(Tcpu[i]):.6e}",
-#                 f"{mean_sinr_db:.4f}",
-#             ])
-#     print(f"Saved CSV: {csv_path}")
-
-#     # ---- Plot 1: reward curve ----
-#     plt.figure()
-#     plt.plot(np.arange(1, len(mean_rewards)+1), mean_rewards)
-#     plt.xlabel("Step")
-#     plt.ylabel("Mean reward")
-#     # plt.title("Evaluation: Mean Reward vs Step")
-#     plt.tight_layout()
-#     path1 = os.path.join(outdir, "eval_reward_curve.png")
-#     plt.savefig(path1, dpi=150)
-#     print(f"Saved plot: {path1}")
-
-#     # ---- Plot 2: SINR histogram (dB) ----
-#     sinr_db = 10*np.log10(np.clip(sinr.flatten(), 1e-12, None))
-#     plt.figure()
-#     plt.hist(sinr_db, bins=40)
-#     plt.xlabel("SINR (dB)")
-#     plt.ylabel("Count")
-#     # plt.title("Evaluation: SINR Distribution (dB)")
-#     plt.tight_layout()
-#     path2 = os.path.join(outdir, "eval_sinr_hist.png")
-#     plt.savefig(path2, dpi=150)
-#     print(f"Saved plot: {path2}")
-
-#     # ---- Plot 3: E2E latency histogram ----
-#     plt.figure()
-#     plt.hist(Te2e.flatten(), bins=40)
-#     plt.xlabel("T_E2E (s)")
-#     plt.ylabel("Count")
-#     # plt.title("Evaluation: End-to-End Latency Distribution")
-#     plt.tight_layout()
-#     path3 = os.path.join(outdir, "eval_latency_hist.png")
-#     plt.savefig(path3, dpi=150)
-#     print(f"Saved plot: {path3}")
-
-#     # ---- Plot 4: Latency components over time (averaged across users) ----
-#     plt.figure()
-#     plt.plot(np.mean(Tloc, axis=1), label="T_loc")
-#     plt.plot(np.mean(Ttx,  axis=1), label="T_tx")
-#     plt.plot(np.mean(TQ,   axis=1), label="T_Q")
-#     plt.plot(np.mean(Tcpu, axis=1), label="T_cpu")
-#     plt.xlabel("Step")
-#     plt.ylabel("Latency (s)")
-#     # plt.title("Evaluation: Average Latency Components vs Step")
-#     plt.legend()
-#     plt.tight_layout()
-#     path4 = os.path.join(outdir, "eval_latency_components.png")
-#     plt.savefig(path4, dpi=150)
-#     print(f"Saved plot: {path4}")
-
-#     print("Done.")
-
-# if __name__ == "__main__":
-#     # Change steps if you want longer curves
-#     eval_and_plot(steps=500, outdir=".")
-
 # mafdrl/eval_plots.py
-import os, glob, csv
+import os
+import argparse
 import numpy as np
 import torch as th
-from scipy.special import expit
-
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-from matplotlib import font_manager
+from scipy.special import expit
 
 from mafdrl.envs.mec_urlcc_env import MECURLLCEnv
 from mafdrl.agents.maddpg import MADDPG
 
-
-# =========================
-# IEEE plot style (Windows-safe Times New Roman)
-# =========================
-def _set_ieee_style():
-    # Try to register Times New Roman explicitly on Windows (common internal names)
-    tnr_candidates = [
-        r"C:\Windows\Fonts\times.ttf",              # regular
-        r"C:\Windows\Fonts\timesbd.ttf",            # bold
-        r"C:\Windows\Fonts\Times New Roman.ttf",    # sometimes present
-        r"C:\Windows\Fonts\Times.ttf",              # fallback
-    ]
-    for fp in tnr_candidates:
-        if os.path.exists(fp):
-            try:
-                font_manager.fontManager.addfont(fp)
-            except Exception:
-                pass  # ignore if already registered / unsupported
-
-    # Set serif family with TNR first and safe fallbacks
-    mpl.rcParams['font.family'] = 'serif'
-    mpl.rcParams['font.serif'] = ['Times New Roman', 'Times', 'Nimbus Roman No9 L', 'DejaVu Serif']
-
-    # Sizes & figure polish
-    mpl.rcParams['font.size'] = 11
-    mpl.rcParams['axes.labelsize'] = 11
-    mpl.rcParams['axes.titlesize'] = 11
-    mpl.rcParams['legend.fontsize'] = 9
-    mpl.rcParams['xtick.labelsize'] = 10
-    mpl.rcParams['ytick.labelsize'] = 10
-    mpl.rcParams['axes.edgecolor'] = 'black'
-    mpl.rcParams['axes.linewidth'] = 0.8
-    mpl.rcParams['figure.dpi'] = 300
-
-    # Remove outer whitespace on save
-    mpl.rcParams['savefig.bbox'] = 'tight'
-    mpl.rcParams['savefig.pad_inches'] = 0
-    mpl.rcParams['figure.autolayout'] = True
-
-    # Keep text editable if you export to PDF
-    plt.rcParams["pdf.fonttype"] = 42
-    plt.rcParams["ps.fonttype"] = 42
-
-_set_ieee_style()
+mpl.rcParams["font.family"] = "Times New Roman"
 
 
-def load_actors(algo: MADDPG, ckpt_dir="checkpoints"):
-    paths = sorted(glob.glob(os.path.join(ckpt_dir, "actor_agent*.pt")))
-    if not paths:
-        print("No checkpoints found; run training first.")
-        return False
-    sds = [th.load(p, map_location="cpu") for p in paths]
-    algo.set_actor_params(sds)
-    print(f"Loaded {len(sds)} actor checkpoints from {ckpt_dir}")
-    return True
+# -----------------------------
+# ACTION MAPPING (MUST MATCH TRAINING + evaluate.py)
+# -----------------------------
+def map_actions(env: MECURLLCEnv, acts: np.ndarray) -> np.ndarray:
+    acts = np.asarray(acts, dtype=np.float32).copy()
+
+    p_min = 0.05 * env.p_max
+    acts[:, 0] = p_min + expit(acts[:, 0]) * (env.p_max - p_min)
+    acts[:, 1] = expit(acts[:, 1])
+
+    f_min = 0.10 * env.f_loc_max
+    acts[:, -1] = f_min + expit(acts[:, -1]) * (env.f_loc_max - f_min)
+
+    return acts
 
 
-def _tighten_axes(ax, xdata=None, ydata=None):
-    """Remove inner whitespace; clamp to data with a tiny pad."""
-    ax.margins(x=0, y=0)
-    if xdata is not None and len(xdata):
-        ax.set_xlim(np.min(xdata), np.max(xdata))
-    if ydata is not None and len(ydata):
-        ymin, ymax = np.min(ydata), np.max(ydata)
-        if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-            rng = ymax - ymin
-            pad = 0.01 * rng
-            ax.set_ylim(ymin - pad, ymax + pad)
-
-
-def eval_and_plot(U=3, Mt=2, Nr=4, steps=500, seed=123, outdir="."):
-    os.makedirs(outdir, exist_ok=True)
-
-    # Env + algo
-    env = MECURLLCEnv(U=U, Mt=Mt, Nr=Nr, seed=seed)
-    obs_dim = 4
-    act_dim = 2 + Mt + 1
+def load_trained_policy(checkpoint_dir: str, U: int, obs_dim: int, act_dim: int):
     algo = MADDPG(U, obs_dim, act_dim, device="cpu")
-    _ = load_actors(algo)
+    state_list = []
+    for i in range(U):
+        path = os.path.join(checkpoint_dir, f"actor_agent{i}.pt")
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Checkpoint not found: {path}")
+        state_list.append(th.load(path, map_location="cpu"))
+    algo.set_actor_params(state_list)
+    print(f"[OK] Loaded actors from: {checkpoint_dir}")
+    return algo
 
-    # Data buffers
-    mean_rewards = []
-    all_sinr = []
-    all_Te2e = []
-    all_Tloc = []
-    all_Ttx = []
-    all_TQ = []
-    all_Tcpu = []
 
-    # Rollout (deterministic: noise_scale=0)
-    obs = env.reset()
-    for t in range(steps):
-        acts = algo.act(obs, noise_scale=0.0)
-        # map actions to valid ranges
-        acts[:, 0] = np.clip(np.abs(acts[:, 0]), 0, env.p_max)     # p
-        acts[:, 1] = expit(acts[:, 1])                              # rho
-        # w left as-is; env normalizes inside
-        # f_loc with stability floor (same as train)
-        f_min = 0.10 * env.f_loc_max
-        acts[:, -1] = f_min + expit(acts[:, -1]) * (env.f_loc_max - f_min)
+def run_eval_for_seed(env_kwargs, algo, seed, episodes=200, ep_len=80):
+    env = MECURLLCEnv(seed=seed, **env_kwargs)
 
-        obs, rew, done, trunc, info = env.step(acts)
+    lat_ms = []
+    sinr_db = []
+    rhos = []
 
-        mean_rewards.append(float(np.mean(rew)))
-        all_sinr.append(info["sinr"].copy())
-        all_Te2e.append(info["T_e2e"].copy())
-        all_Tloc.append(info["T_loc"].copy())
-        all_Ttx.append(info["T_tx"].copy())
-        all_TQ.append(info["T_Q"].copy())
-        all_Tcpu.append(info["T_cpu"].copy())
+    for _ in range(episodes):
+        obs = env.reset()
+        for _ in range(ep_len):
+            raw = algo.act(obs, noise_scale=0.0)
+            acts = map_actions(env, raw)
 
-    # Convert to arrays
-    mean_rewards = np.asarray(mean_rewards)                   # (steps,)
-    sinr = np.vstack(all_sinr)                                # (steps,U)
-    Te2e = np.vstack(all_Te2e)
-    Tloc = np.vstack(all_Tloc)
-    Ttx  = np.vstack(all_Ttx)
-    TQ   = np.vstack(all_TQ)
-    Tcpu = np.vstack(all_Tcpu)
+            nobs, rew, done, trunc, info = env.step(acts)
 
-    # ---- Save CSV for paper tables ----
-    csv_path = os.path.join(outdir, "eval_metrics.csv")
-    with open(csv_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["step", "mean_reward", "mean_Te2e", "mean_Tloc", "mean_Ttx", "mean_TQ", "mean_Tcpu", "mean_SINR_dB"])
-        for i in range(len(mean_rewards)):
-            mean_sinr_db = 10*np.log10(max(1e-12, np.mean(sinr[i])))
-            w.writerow([
-                i+1,
-                f"{mean_rewards[i]:.6f}",
-                f"{np.mean(Te2e[i]):.6e}",
-                f"{np.mean(Tloc[i]):.6e}",
-                f"{np.mean(Ttx[i]):.6e}",
-                f"{np.mean(TQ[i]):.6e}",
-                f"{np.mean(Tcpu[i]):.6e}",
-                f"{mean_sinr_db:.4f}",
-            ])
-    print(f"Saved CSV: {csv_path}")
+            Te2e = np.asarray(info.get("T_e2e", []), dtype=np.float64).reshape(-1)
+            sinr = np.asarray(info.get("sinr", []), dtype=np.float64).reshape(-1)  # linear
+            rho = np.asarray(info.get("rho", []), dtype=np.float64).reshape(-1)
 
-    # Common x for time-series plots
-    xs = np.arange(1, len(mean_rewards) + 1)
+            if Te2e.size:
+                lat_ms.extend((1e3 * Te2e).tolist())
+            if sinr.size:
+                sinr_db.extend((10.0 * np.log10(np.maximum(sinr, 1e-20))).tolist())
+            if rho.size:
+                rhos.append(rho.copy())
 
-    # ---- Plot 1: reward curve ----
-    fig = plt.figure(figsize=(6, 4))
-    ax = plt.gca()
-    ax.plot(xs, mean_rewards, lw=1.6)
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Mean reward")
-    _tighten_axes(ax, xs, mean_rewards)
-    path1 = os.path.join(outdir, "eval_reward_curve.png")
-    fig.savefig(path1, dpi=300)  # bbox/pad handled by rcParams
-    plt.close(fig)
-    print(f"Saved plot: {path1}")
+            obs = nobs
+            if bool(np.any(done)) or bool(np.any(trunc)):
+                break
 
-    # ---- Plot 2: SINR histogram (dB) ----
-    sinr_db = 10*np.log10(np.clip(sinr.flatten(), 1e-12, None))
-    fig = plt.figure(figsize=(6, 4))
-    ax = plt.gca()
-    counts, bins, _ = ax.hist(sinr_db, bins=40)
-    ax.set_xlabel("SINR (dB)")
-    ax.set_ylabel("")
-    # Tighten to bin edges; remove inner margins
-    ax.set_xlim(bins[0], bins[-1])
-    _tighten_axes(ax)
-    path2 = os.path.join(outdir, "eval_sinr_hist.png")
-    fig.savefig(path2, dpi=300)
-    plt.close(fig)
-    print(f"Saved plot: {path2}")
+    rhos = np.stack(rhos, axis=0) if len(rhos) else np.zeros((0, env_kwargs["U"]), dtype=np.float64)
+    return np.asarray(lat_ms, dtype=np.float64), np.asarray(sinr_db, dtype=np.float64), rhos
 
-    # ---- Plot 3: E2E latency histogram ----
-    fig = plt.figure(figsize=(6, 4))
-    ax = plt.gca()
-    counts, bins, _ = ax.hist(Te2e.flatten(), bins=40)
-    ax.set_xlabel("T_E2E (s)")
-    ax.set_ylabel("")
-    ax.set_xlim(bins[0], bins[-1])
-    _tighten_axes(ax)
-    path3 = os.path.join(outdir, "eval_latency_hist.png")
-    fig.savefig(path3, dpi=300)
-    plt.close(fig)
-    print(f"Saved plot: {path3}")
 
-    # ---- Plot 4: Latency components over time (averaged across users) ----
-    fig = plt.figure(figsize=(6, 4))
-    ax = plt.gca()
-    ax.plot(xs, np.mean(Tloc, axis=1), label="T_loc", lw=1.4)
-    ax.plot(xs, np.mean(Ttx,  axis=1), label="T_tx",  lw=1.4)
-    ax.plot(xs, np.mean(TQ,   axis=1), label="T_Q",   lw=1.4)
-    ax.plot(xs, np.mean(Tcpu, axis=1), label="T_cpu", lw=1.4)
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Latency (s)")
-    ax.legend(frameon=False)
-    _tighten_axes(ax, xs, np.hstack([
-        np.mean(Tloc, axis=1),
-        np.mean(Ttx,  axis=1),
-        np.mean(TQ,   axis=1),
-        np.mean(Tcpu, axis=1)
-    ]))
-    path4 = os.path.join(outdir, "eval_latency_components.png")
-    fig.savefig(path4, dpi=300)
-    plt.close(fig)
-    print(f"Saved plot: {path4}")
-    print("Done.")
+def plot_latency_cdf(env_kwargs, algo, out_path, seeds, deadline_ms):
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    plt.figure(figsize=(4.2, 3.2))
+
+    for i, s in enumerate(seeds):
+        lat_ms, _, _ = run_eval_for_seed(env_kwargs, algo, seed=s, episodes=200, ep_len=80)
+        if lat_ms.size == 0:
+            continue
+
+        lat_sorted = np.sort(lat_ms)
+        cdf = np.arange(1, lat_sorted.size + 1) / lat_sorted.size
+        pct = 100.0 * float(np.mean(lat_ms <= deadline_ms))
+        plt.plot(lat_sorted, cdf, label=f"Seed {i} ({pct:.1f}%)")
+
+    plt.axvline(deadline_ms, linestyle="--", linewidth=1.0, label="10 ms deadline")
+    plt.xlabel(r"End-to-end latency $T_{\mathrm{E2E}}$ (ms)", fontsize=10)
+    plt.ylabel("CDF", fontsize=10)
+    plt.tick_params(axis="both", labelsize=9)
+    plt.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
+    plt.legend(fontsize=8, loc="lower right")
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    print(f"[OK] Saved latency CDF: {out_path}")
+
+
+def plot_sinr_histogram(env_kwargs, algo, out_path):
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    _, sinr_db, _ = run_eval_for_seed(env_kwargs, algo, seed=9000, episodes=250, ep_len=80)
+    if sinr_db.size == 0:
+        raise RuntimeError("No SINR samples collected.")
+
+    rng = float(np.max(sinr_db) - np.min(sinr_db))
+    if rng < 1e-3:
+        print("[WARN] SINR histogram collapsed (very small range). Policy may output near-zero power OR mapping/checkpoints mismatch.")
+
+    plt.figure(figsize=(4.2, 3.2))
+    plt.hist(sinr_db, bins=35, edgecolor="black", linewidth=0.4)
+
+    plt.xlabel("Post-combining SINR (dB)", fontsize=10)
+    plt.ylabel("Count", fontsize=10)
+    plt.tick_params(axis="both", labelsize=9)
+    plt.grid(True, axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    print(f"[OK] Saved SINR histogram: {out_path}")
+
+
+def plot_offload_distribution(env_kwargs, algo, out_path):
+    """
+    Boxplot of rho per UE across all collected steps (shows variability).
+    """
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    _, _, rhos = run_eval_for_seed(env_kwargs, algo, seed=10000, episodes=250, ep_len=80)
+    if rhos.shape[0] == 0:
+        raise RuntimeError("No offloading samples collected.")
+
+    U = env_kwargs["U"]
+    data = [rhos[:, u] for u in range(U)]
+    means = [float(np.mean(d)) for d in data]
+
+    fig, ax = plt.subplots(figsize=(4.2, 3.2))
+
+    ax.boxplot(
+        data,
+        tick_labels=[f"UE{u+1}" for u in range(U)],
+        showfliers=False,
+        widths=0.5,
+    )
+    ax.scatter(np.arange(1, U + 1), means, label="UE mean", zorder=3)
+
+    ax.set_xlabel("User equipment (UE)", fontsize=10)
+    ax.set_ylabel(r"Offloading ratio $\rho$", fontsize=10)
+    ax.set_ylim(0.0, 1.05)
+    ax.tick_params(axis="both", labelsize=9)
+    ax.grid(True, axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
+    ax.legend(fontsize=8, loc="lower right")
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    print(f"[OK] Saved offloading distribution: {out_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints_long")
+    parser.add_argument("--U", type=int, default=3)
+    parser.add_argument("--Mt", type=int, default=2)
+    parser.add_argument("--Nr", type=int, default=4)
+    parser.add_argument("--deadline_ms", type=float, default=10.0)
+    args = parser.parse_args()
+
+    # Build a temporary env to infer dims (avoids hardcoding obs_dim/act_dim)
+    env_tmp = MECURLLCEnv(U=args.U, Mt=args.Mt, Nr=args.Nr, seed=0)
+    obs = env_tmp.reset()
+    obs_dim = int(obs.shape[1])
+    act_dim = int(2 + args.Mt + 1)
+
+    env_kwargs = dict(U=args.U, Mt=args.Mt, Nr=args.Nr)
+
+    algo = load_trained_policy(args.checkpoint_dir, args.U, obs_dim, act_dim)
+
+    plot_latency_cdf(
+        env_kwargs, algo,
+        out_path="Results/latency_cdf.png",
+        seeds=[6000, 7000, 8000],
+        deadline_ms=args.deadline_ms
+    )
+    plot_sinr_histogram(env_kwargs, algo, out_path="Results/sinr_histogram.png")
+    plot_offload_distribution(env_kwargs, algo, out_path="Results/offload_distribution.png")
+
 
 if __name__ == "__main__":
-    # Change steps if you want longer curves
-    eval_and_plot(steps=500, outdir=".")
+    main()
